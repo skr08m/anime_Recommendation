@@ -1,0 +1,157 @@
+package client;
+
+import java.sql.SQLException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.openqa.selenium.By;
+import org.openqa.selenium.ElementClickInterceptedException;
+import org.openqa.selenium.NoSuchElementException;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.WebElement;
+import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.support.ui.ExpectedConditions;
+import org.openqa.selenium.support.ui.WebDriverWait;
+
+import io.github.bonigarcia.wdm.WebDriverManager;
+import model.AnimeDataModel;
+import model.EmotionModel;
+import model.ItemRepository;
+
+public class FetchWebData {
+	ItemRepository itemRepository;
+
+	public FetchWebData(ItemRepository itemRepository) {
+		this.itemRepository = itemRepository;
+	}
+
+	public void scrapeAnimeByIdRange() throws InterruptedException {
+		final int START_ID = 79;//id78 「宇宙海賊キャプテンハーロック（TVアニメ動画）」まで取得完了
+		final int END_ID = 15114;
+		final int MIN_REVIEW_LENGTH = 100;
+
+		try {
+			WebDriverManager.chromedriver().setup();
+		} catch (Exception e) {
+			System.err.println("・WebDriverManagerセットアップ失敗: " + e.getMessage());
+		}
+
+		WebDriver driver = new ChromeDriver();
+
+		try {
+			for (int id = START_ID; id <= END_ID; id++) {
+				List<AnimeDataModel> resultList = new ArrayList<>();
+
+				String url = "https://www.anikore.jp/anime_review/" + id + "/";
+				driver.get(url);
+				if(isAdPage(driver)) {
+					id--;
+					continue;
+				}
+
+				String currentUrl = driver.getCurrentUrl();
+				if (currentUrl.equals("https://www.anikore.jp/")) {
+					System.out.println("🔸 ID " + id + " は存在しないためスキップ");
+					continue;
+				}
+
+				try {
+					WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(5));
+
+					// タイトル取得
+					WebElement titleElement = wait.until(
+							ExpectedConditions.presenceOfElementLocated(By.xpath("//*[@id='page-top']/section[4]/div/h1"))
+							);
+					String title = titleElement.getText().trim();
+
+					// --- ここから「もっと見る」ボタンを連続クリックして全レビュー展開 ---
+					try {
+						while (true) {
+							WebElement moreButton = driver.findElement(By.cssSelector("button.more_review_button"));
+							if (moreButton.isDisplayed() && moreButton.isEnabled()) {
+								moreButton.click();
+								Thread.sleep(300); // ボタンクリック後の読み込み待ち
+							} else {
+								break;
+							}
+						}
+					} catch (NoSuchElementException e) {
+						// 「もっと見る」ボタンがない場合は無視して続行
+					} catch (ElementClickInterceptedException e) {
+						// クリックできなかった場合もループ終了
+					}
+
+					// --- 「ネタバレ注意」展開ボタンをクリックして隠しテキストを表示 ---
+					List<WebElement> spoilerButtons = driver.findElements(By.cssSelector(".spoiler_expand_button"));
+					for (WebElement btn : spoilerButtons) {
+						if (btn.isDisplayed() && btn.isEnabled()) {
+							try {
+								btn.click();
+								//Thread.sleep(500); // クリック後の少しの待機
+							} catch (Exception ignore) {}
+						}
+					}
+
+					// 感想レビュー取得
+					List<WebElement> reviewBlocks = driver.findElements(
+							By.cssSelector("p.m-reviewUnit_userText_content.ateval_description")
+							);
+
+					if (reviewBlocks.isEmpty()) {
+						System.out.println("🟡 ID " + id + ": 感想なしのためスキップ");
+						continue;
+					}
+
+					//取得した情報の処理
+					for (WebElement review : reviewBlocks) {
+						String impression = review.getText().trim();
+						if (isValidReview(impression, MIN_REVIEW_LENGTH)) {
+							resultList.add(new AnimeDataModel(title, impression));
+						}
+					}
+
+					if (resultList.size() == 0) {
+						System.out.println("🟡 ID " + id + ": 有効な感想なしのためスキップ");
+					} else {
+						/*for (AnimeDataModel a : resultList) {
+							System.out.println(a.getImpression());
+							System.out.println("感想ここまで");
+						}*/
+						itemRepository.insertTitleAndImpression(resultList);//DBへ登録
+						System.out.println("✅ ID " + id + ": " + title + "（レビュー登録数: " + resultList.size() + "）");
+					}
+
+				}catch (SQLException e) {
+					System.err.println(e);
+				}
+
+				//Thread.sleep(1000); // 次のID処理まで1秒待機
+			}
+		} finally {
+			driver.quit();
+		}
+	}
+
+	public void insertEmotionUsingApi(List<EmotionModel> emotionList) {
+
+	}
+
+	private boolean isValidReview(String text, int minLength) {
+		return text.length() >= minLength;
+	}
+
+	private boolean isAdPage(WebDriver driver) {
+		try {
+			String url = driver.getCurrentUrl();
+
+			if (url.contains("#google_vignette") || url.contains("google_vignette") || url.contains("ads")) {
+				System.out.println("広告処理");
+				return true;
+			}
+		} catch (Exception e) {
+			return false;
+		}
+		return false;
+	}
+}
